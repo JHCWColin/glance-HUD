@@ -62,7 +62,8 @@ jobs:
         run: chmod +x scripts/package_ios_artifacts.sh
 
       - name: Build simulator and unsigned device artifacts
-        run: scripts/package_ios_artifacts.sh
+        shell: bash
+        run: bash scripts/package_ios_artifacts.sh
 
       - name: Prepare release asset names
         shell: bash
