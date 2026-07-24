@@ -24,11 +24,10 @@ final class BLEViewModel: ObservableObject {
     private var lastMinuteToken: String?
     private var latestWeather: WeatherSnapshot?
 
-    override init() {
+    init() {
         self.bleService = BLEService()
         self.weatherService = WeatherService()
         self.locationService = LocationService()
-        super.init()
         configureServices()
     }
 
@@ -40,7 +39,6 @@ final class BLEViewModel: ObservableObject {
         self.bleService = bleService
         self.weatherService = weatherService
         self.locationService = locationService
-        super.init()
         configureServices()
     }
 
