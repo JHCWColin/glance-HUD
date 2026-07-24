@@ -13,6 +13,7 @@ final class BLEViewModel: ObservableObject {
     @Published var customMessage = ""
     @Published var logs: [BLELogEntry] = []
     @Published var isConnected = false
+    @Published var diagnosticSnapshot = BLEDiagnosticSnapshot.initial
 
     private let bleService: BLEService
     private let weatherService: WeatherService
@@ -256,6 +257,10 @@ extension BLEViewModel: BLEServiceDelegate {
             connectionStatus = "Disconnected"
             isConnected = false
         }
+    }
+
+    func bleService(_ service: BLEService, didUpdateDiagnostic snapshot: BLEDiagnosticSnapshot) {
+        diagnosticSnapshot = snapshot
     }
 
     func bleService(_ service: BLEService, didLog entry: BLELogEntry) {

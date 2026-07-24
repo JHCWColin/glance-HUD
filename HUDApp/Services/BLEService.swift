@@ -1,6 +1,101 @@
 import Foundation
 @preconcurrency import CoreBluetooth
 
+enum BLERuntimeEnvironment: String, Equatable, Sendable {
+    case simulator
+    case physicalDevice
+
+    static var current: BLERuntimeEnvironment {
+        #if targetEnvironment(simulator)
+        return .simulator
+        #else
+        return .physicalDevice
+        #endif
+    }
+
+    var title: String {
+        switch self {
+        case .simulator:
+            return "iOS Simulator"
+        case .physicalDevice:
+            return "Physical iPhone"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .simulator:
+            return "The simulator does not expose usable CoreBluetooth hardware, so BLE scan/connect cannot start here."
+        case .physicalDevice:
+            return "Running on real hardware. BLE discovery and connection can proceed if Bluetooth is powered on."
+        }
+    }
+
+    var supportsBLEHardware: Bool {
+        self == .physicalDevice
+    }
+}
+
+enum BLEWorkflowStep: Equatable, Sendable {
+    case startup
+    case environmentCheck
+    case bluetoothStateCheck
+    case scanning
+    case connecting
+    case serviceDiscovery
+    case characteristicDiscovery
+    case ready
+    case disconnected
+    case packetWrite
+
+    var title: String {
+        switch self {
+        case .startup:
+            return "Startup"
+        case .environmentCheck:
+            return "Environment Check"
+        case .bluetoothStateCheck:
+            return "Bluetooth State Check"
+        case .scanning:
+            return "Scanning"
+        case .connecting:
+            return "Connecting"
+        case .serviceDiscovery:
+            return "Service Discovery"
+        case .characteristicDiscovery:
+            return "Characteristic Discovery"
+        case .ready:
+            return "Ready"
+        case .disconnected:
+            return "Disconnected"
+        case .packetWrite:
+            return "Packet Write"
+        }
+    }
+}
+
+struct BLEDiagnosticSnapshot: Equatable, Sendable {
+    let environment: BLERuntimeEnvironment
+    let currentStep: BLEWorkflowStep
+    let detail: String
+    let analysis: String
+    let failureStep: BLEWorkflowStep?
+    let failureReason: String?
+    let isBlocking: Bool
+
+    static var initial: BLEDiagnosticSnapshot {
+        BLEDiagnosticSnapshot(
+            environment: .current,
+            currentStep: .startup,
+            detail: "Waiting for BLE startup.",
+            analysis: "The app has not started CoreBluetooth initialization yet.",
+            failureStep: nil,
+            failureReason: nil,
+            isBlocking: false
+        )
+    }
+}
+
 enum BLEConnectionState: Equatable, Sendable {
     case idle
     case bluetoothUnavailable(reason: String)
@@ -13,13 +108,20 @@ enum BLEConnectionState: Equatable, Sendable {
 @MainActor
 protocol BLEServiceDelegate: AnyObject {
     func bleService(_ service: BLEService, didUpdateConnectionState state: BLEConnectionState)
+    func bleService(_ service: BLEService, didUpdateDiagnostic snapshot: BLEDiagnosticSnapshot)
     func bleService(_ service: BLEService, didLog entry: BLELogEntry)
     func bleServiceDidBecomeReady(_ service: BLEService)
 }
 
 @MainActor
 final class BLEService: NSObject {
-    weak var delegate: BLEServiceDelegate?
+    weak var delegate: BLEServiceDelegate? {
+        didSet {
+            if let delegate {
+                delegate.bleService(self, didUpdateDiagnostic: diagnosticSnapshot)
+            }
+        }
+    }
 
     private lazy var centralManager: CBCentralManager = {
         CBCentralManager(
@@ -40,6 +142,8 @@ final class BLEService: NSObject {
     private var hasSignaledReady = false
     private var outboundQueue: [PendingTransmission] = []
     private var activeTransmission: PendingTransmission?
+    private let runtimeEnvironment = BLERuntimeEnvironment.current
+    private var diagnosticSnapshot = BLEDiagnosticSnapshot.initial
 
     var isReadyToSend: Bool {
         guard let activePeripheral, let writeCharacteristic else {
@@ -66,20 +170,67 @@ final class BLEService: NSObject {
 
         hasStarted = true
         updateConnectionState(.idle)
+
+        updateDiagnostic(
+            step: .environmentCheck,
+            detail: "Current environment: \(runtimeEnvironment.title).",
+            analysis: runtimeEnvironment.detail
+        )
+
+        guard runtimeEnvironment.supportsBLEHardware else {
+            let reason = "Running in iOS Simulator"
+            updateDiagnosticFailure(
+                step: .environmentCheck,
+                reason: reason,
+                analysis: "Failure happened before scan started because the simulator cannot provide a real Bluetooth radio."
+            )
+            updateConnectionState(.bluetoothUnavailable(reason: reason))
+            emitLog(
+                "Current environment is iOS Simulator. BLE scanning and connection require a real iPhone or iPad.",
+                level: .error
+            )
+            return
+        }
+
+        updateDiagnostic(
+            step: .bluetoothStateCheck,
+            detail: "Waiting for CoreBluetooth to report the radio state.",
+            analysis: "The next blocking point is whether iOS reports Bluetooth as powered on."
+        )
         _ = centralManager
     }
 
     func startScan() {
         manualDisconnect = false
 
+        guard runtimeEnvironment.supportsBLEHardware else {
+            updateDiagnosticFailure(
+                step: .environmentCheck,
+                reason: "Manual scan requested in iOS Simulator",
+                analysis: "The request stopped before scan because there is no BLE hardware in the simulator."
+            )
+            emitLog("Scan request ignored because the app is running in iOS Simulator.", level: .error)
+            return
+        }
+
         guard centralManager.state == .poweredOn else {
             emitLog("Bluetooth is not powered on yet.", level: .warning)
+            updateDiagnosticFailure(
+                step: .bluetoothStateCheck,
+                reason: "Bluetooth is not powered on yet.",
+                analysis: "Failure happened before scan because iOS has not exposed a usable Bluetooth radio yet."
+            )
             return
         }
 
         if let activePeripheral, activePeripheral.state == .connected {
             updateConnectionState(.connected(deviceName: displayName(for: activePeripheral)))
             emitLog("Already connected to \(displayName(for: activePeripheral)).", level: .info)
+            updateDiagnostic(
+                step: .ready,
+                detail: "Already connected to \(displayName(for: activePeripheral)).",
+                analysis: "BLE transport is already established. You can send packets immediately."
+            )
             return
         }
 
@@ -93,7 +244,12 @@ final class BLEService: NSObject {
         )
         isScanning = true
         updateConnectionState(.scanning)
-        emitLog("Scanning for HUD Glasses / XIAO-HUD.", level: .info)
+        updateDiagnostic(
+            step: .scanning,
+            detail: "Scanning for peripherals named GlanceHUD, HUD Glasses, or XIAO-HUD.",
+            analysis: "If the app stays here, the ESP32 is not advertising, the name does not match, or the phone is out of range."
+        )
+        emitLog("Scanning for GlanceHUD / HUD Glasses / XIAO-HUD.", level: .info)
     }
 
     func disconnect() {
@@ -103,6 +259,11 @@ final class BLEService: NSObject {
 
         guard let activePeripheral else {
             updateConnectionState(.disconnected)
+            updateDiagnostic(
+                step: .disconnected,
+                detail: "No active peripheral to disconnect.",
+                analysis: "The BLE session is already idle. Tap Scan after the ESP32 starts advertising."
+            )
             return
         }
 
@@ -113,7 +274,21 @@ final class BLEService: NSObject {
     func resumeConnectionFlow() {
         manualDisconnect = false
 
+        guard runtimeEnvironment.supportsBLEHardware else {
+            updateDiagnosticFailure(
+                step: .environmentCheck,
+                reason: "Resume requested in iOS Simulator",
+                analysis: "The app cannot restore or resume BLE work in the simulator because no Bluetooth hardware exists there."
+            )
+            return
+        }
+
         guard centralManager.state == .poweredOn else {
+            updateDiagnosticFailure(
+                step: .bluetoothStateCheck,
+                reason: "Bluetooth is not powered on yet.",
+                analysis: "Resume stopped before scan because iOS has not exposed a usable Bluetooth radio yet."
+            )
             return
         }
 
@@ -124,9 +299,19 @@ final class BLEService: NSObject {
                 discoverHUDServices(on: activePeripheral)
                 announceReadyIfPossible(on: activePeripheral)
                 updateConnectionState(.connected(deviceName: displayName(for: activePeripheral)))
+                updateDiagnostic(
+                    step: .serviceDiscovery,
+                    detail: "Using restored connection for \(displayName(for: activePeripheral)).",
+                    analysis: "A peripheral is already connected. The app is re-validating services and characteristics."
+                )
                 return
             case .connecting:
                 updateConnectionState(.connecting(deviceName: displayName(for: activePeripheral)))
+                updateDiagnostic(
+                    step: .connecting,
+                    detail: "Resuming connection to \(displayName(for: activePeripheral)).",
+                    analysis: "The peripheral was previously selected. The next blocking point is GATT link establishment."
+                )
                 return
             default:
                 break
@@ -173,6 +358,11 @@ final class BLEService: NSObject {
             activePeripheral.delegate = self
             emitLog("Attempting reconnect to \(displayName(for: activePeripheral)).", level: .info)
             updateConnectionState(.connecting(deviceName: displayName(for: activePeripheral)))
+            updateDiagnostic(
+                step: .connecting,
+                detail: "Attempting reconnect to \(displayName(for: activePeripheral)).",
+                analysis: "The phone already knows this peripheral. The next failure point is whether the BLE link can be re-opened."
+            )
             centralManager.connect(activePeripheral, options: nil)
             return
         }
@@ -185,6 +375,11 @@ final class BLEService: NSObject {
                 peripheral.delegate = self
                 emitLog("Found saved peripheral \(displayName(for: peripheral)).", level: .info)
                 updateConnectionState(.connecting(deviceName: displayName(for: peripheral)))
+                updateDiagnostic(
+                    step: .connecting,
+                    detail: "Found saved peripheral \(displayName(for: peripheral)). Connecting now.",
+                    analysis: "Advertising lookup succeeded through CoreBluetooth restore. The next blocking point is GATT connection establishment."
+                )
                 centralManager.connect(peripheral, options: nil)
                 return
             }
@@ -205,6 +400,11 @@ final class BLEService: NSObject {
         if !hasSignaledReady {
             hasSignaledReady = true
             updateConnectionState(.connected(deviceName: displayName(for: peripheral)))
+            updateDiagnostic(
+                step: .ready,
+                detail: "Write characteristic is ready for \(displayName(for: peripheral)).",
+                analysis: "BLE transport setup succeeded. Clock, date, weather, battery, and custom messages can now be sent."
+            )
             emitLog("HUD transport is ready.", level: .success)
             delegate?.bleServiceDidBecomeReady(self)
         }
@@ -280,6 +480,43 @@ final class BLEService: NSObject {
         delegate?.bleService(
             self,
             didLog: BLELogEntry(timestamp: Date(), level: level, message: message)
+        )
+    }
+
+    private func updateDiagnostic(
+        step: BLEWorkflowStep,
+        detail: String,
+        analysis: String,
+        failureStep: BLEWorkflowStep? = nil,
+        failureReason: String? = nil,
+        isBlocking: Bool = false
+    ) {
+        let nextSnapshot = BLEDiagnosticSnapshot(
+            environment: runtimeEnvironment,
+            currentStep: step,
+            detail: detail,
+            analysis: analysis,
+            failureStep: failureStep,
+            failureReason: failureReason,
+            isBlocking: isBlocking
+        )
+
+        guard nextSnapshot != diagnosticSnapshot else {
+            return
+        }
+
+        diagnosticSnapshot = nextSnapshot
+        delegate?.bleService(self, didUpdateDiagnostic: nextSnapshot)
+    }
+
+    private func updateDiagnosticFailure(step: BLEWorkflowStep, reason: String, analysis: String, isBlocking: Bool = true) {
+        updateDiagnostic(
+            step: step,
+            detail: "Blocked at \(step.title).",
+            analysis: analysis,
+            failureStep: step,
+            failureReason: reason,
+            isBlocking: isBlocking
         )
     }
 
@@ -371,21 +608,41 @@ extension BLEService: @preconcurrency CBCentralManagerDelegate {
         switch central.state {
         case .poweredOn:
             emitLog(description, level: .success)
+            updateDiagnostic(
+                step: .bluetoothStateCheck,
+                detail: description,
+                analysis: "Bluetooth is ready. The app can now reconnect to a saved device or start scanning for a matching advertisement."
+            )
             attemptReconnectOrScan()
 
         case .unknown, .resetting:
             clearConnectionState(keepPeripheral: true)
             updateConnectionState(.bluetoothUnavailable(reason: description))
+            updateDiagnosticFailure(
+                step: .bluetoothStateCheck,
+                reason: description,
+                analysis: "Failure happened before scan because the Bluetooth stack is not stable enough yet to start discovery."
+            )
             emitLog(description, level: .warning)
 
         case .unsupported, .unauthorized, .poweredOff:
             clearConnectionState(keepPeripheral: true)
             updateConnectionState(.bluetoothUnavailable(reason: description))
+            updateDiagnosticFailure(
+                step: .bluetoothStateCheck,
+                reason: description,
+                analysis: "Failure happened before scan because the phone cannot currently offer an enabled BLE radio to the app."
+            )
             emitLog(description, level: .error)
 
         @unknown default:
             clearConnectionState(keepPeripheral: true)
             updateConnectionState(.bluetoothUnavailable(reason: description))
+            updateDiagnosticFailure(
+                step: .bluetoothStateCheck,
+                reason: description,
+                analysis: "Failure happened before scan because the Bluetooth stack returned an unknown state."
+            )
             emitLog(description, level: .error)
         }
     }
@@ -397,6 +654,11 @@ extension BLEService: @preconcurrency CBCentralManagerDelegate {
             peripheral.delegate = self
             persist(peripheral)
             emitLog("Restored BLE state for \(displayName(for: peripheral)).", level: .info)
+            updateDiagnostic(
+                step: .connecting,
+                detail: "Restored BLE state for \(displayName(for: peripheral)).",
+                analysis: "State restoration succeeded. The app is re-entering the connection pipeline from an already known peripheral."
+            )
 
             if peripheral.state == .connected {
                 discoverHUDServices(on: peripheral)
@@ -424,6 +686,11 @@ extension BLEService: @preconcurrency CBCentralManagerDelegate {
         peripheral.delegate = self
         stopScanningIfNeeded()
         updateConnectionState(.connecting(deviceName: name))
+        updateDiagnostic(
+            step: .connecting,
+            detail: "Found target \(name). Opening the BLE link.",
+            analysis: "Advertising succeeded. The next blocking point is whether the GATT connection can be established."
+        )
         emitLog("Found target \(name) (RSSI \(RSSI)).", level: .success)
         centralManager.connect(peripheral, options: nil)
     }
@@ -435,12 +702,22 @@ extension BLEService: @preconcurrency CBCentralManagerDelegate {
         resetCharacteristicState()
         emitLog("Connected to \(displayName(for: peripheral)).", level: .success)
         updateConnectionState(.connected(deviceName: displayName(for: peripheral)))
+        updateDiagnostic(
+            step: .serviceDiscovery,
+            detail: "Connected to \(displayName(for: peripheral)). Discovering service \(HUDBLEConstants.serviceUUID.uuidString).",
+            analysis: "The BLE link is up. The next blocking point is whether the ESP32 exposes the expected service UUID."
+        )
         discoverHUDServices(on: peripheral)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         let detail = error?.localizedDescription ?? "Unknown error"
         clearConnectionState(keepPeripheral: true)
+        updateDiagnosticFailure(
+            step: .connecting,
+            reason: "Failed to connect to \(displayName(for: peripheral)): \(detail)",
+            analysis: "Advertising succeeded, but the BLE link failed to open. Common causes are unstable firmware, insufficient power, or the peripheral stopping advertisement too early."
+        )
         emitLog("Failed to connect to \(displayName(for: peripheral)): \(detail)", level: .error)
         updateConnectionState(.disconnected)
         if !manualDisconnect {
@@ -453,8 +730,20 @@ extension BLEService: @preconcurrency CBCentralManagerDelegate {
         clearConnectionState(keepPeripheral: !manualDisconnect)
 
         if let error {
+            updateDiagnosticFailure(
+                step: .ready,
+                reason: "Disconnected from \(name): \(error.localizedDescription)",
+                analysis: "The BLE session was established, then dropped. Common causes are ESP32 reset, low power, firmware crash, or moving out of radio range."
+            )
             emitLog("Disconnected from \(name): \(error.localizedDescription)", level: .warning)
         } else {
+            updateDiagnostic(
+                step: .disconnected,
+                detail: "Disconnected from \(name).",
+                analysis: manualDisconnect
+                    ? "The session was closed from the app side. Tap Scan to restart discovery."
+                    : "The BLE session ended cleanly. If this was unexpected, inspect ESP32 power, firmware stability, and radio range."
+            )
             emitLog("Disconnected from \(name).", level: .warning)
         }
 
@@ -463,6 +752,11 @@ extension BLEService: @preconcurrency CBCentralManagerDelegate {
         if !manualDisconnect {
             activePeripheral = peripheral
             updateConnectionState(.connecting(deviceName: name))
+            updateDiagnostic(
+                step: .connecting,
+                detail: "Attempting automatic reconnect to \(name).",
+                analysis: "The previous session ended. The app is now retrying GATT connection establishment."
+            )
             scheduleReconnect()
         } else {
             activePeripheral = nil
@@ -475,15 +769,30 @@ extension BLEService: @preconcurrency CBCentralManagerDelegate {
 extension BLEService: @preconcurrency CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error {
+            updateDiagnosticFailure(
+                step: .serviceDiscovery,
+                reason: "Service discovery failed: \(error.localizedDescription)",
+                analysis: "The BLE link exists, but iOS could not read the GATT service table from the peripheral."
+            )
             emitLog("Service discovery failed: \(error.localizedDescription)", level: .error)
             return
         }
 
         guard let service = peripheral.services?.first(where: { $0.uuid == HUDBLEConstants.serviceUUID }) else {
+            updateDiagnosticFailure(
+                step: .serviceDiscovery,
+                reason: "Expected service UUID \(HUDBLEConstants.serviceUUID.uuidString) was not found.",
+                analysis: "The phone connected successfully, but the firmware is not exposing the service UUID that this app expects."
+            )
             emitLog("HUD service UUID not found on \(displayName(for: peripheral)).", level: .error)
             return
         }
 
+        updateDiagnostic(
+            step: .characteristicDiscovery,
+            detail: "Found service \(service.uuid.uuidString). Discovering characteristics.",
+            analysis: "Connection and service discovery succeeded. The next blocking point is whether the write characteristic exists."
+        )
         emitLog("HUD service discovered.", level: .success)
         peripheral.discoverCharacteristics(
             [
@@ -496,6 +805,11 @@ extension BLEService: @preconcurrency CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         if let error {
+            updateDiagnosticFailure(
+                step: .characteristicDiscovery,
+                reason: "Characteristic discovery failed: \(error.localizedDescription)",
+                analysis: "The service exists, but iOS could not enumerate the characteristics required by the app."
+            )
             emitLog("Characteristic discovery failed: \(error.localizedDescription)", level: .error)
             return
         }
@@ -512,7 +826,13 @@ extension BLEService: @preconcurrency CBPeripheralDelegate {
         }
 
         if writeCharacteristic == nil {
+            updateDiagnosticFailure(
+                step: .characteristicDiscovery,
+                reason: "Expected write characteristic UUID \(HUDBLEConstants.writeCharacteristicUUID.uuidString) was not found.",
+                analysis: "The service exists, but the firmware does not expose the write endpoint that the app uses to send HUD packets."
+            )
             emitLog("Write characteristic UUID not found.", level: .error)
+            return
         }
 
         announceReadyIfPossible(on: peripheral)
@@ -520,6 +840,14 @@ extension BLEService: @preconcurrency CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         if let error {
+            updateDiagnostic(
+                step: .characteristicDiscovery,
+                detail: "Notify subscription failed for \(characteristic.uuid.uuidString).",
+                analysis: "The outbound write path may still work, but inbound notify data will not arrive until the firmware accepts notification subscription.",
+                failureStep: .characteristicDiscovery,
+                failureReason: "Notify subscription failed: \(error.localizedDescription)",
+                isBlocking: false
+            )
             emitLog("Notify subscription failed: \(error.localizedDescription)", level: .error)
             return
         }
@@ -530,6 +858,11 @@ extension BLEService: @preconcurrency CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error {
+            updateDiagnosticFailure(
+                step: .packetWrite,
+                reason: "BLE write failed: \(error.localizedDescription)",
+                analysis: "Setup succeeded, but packet transmission failed after the connection was ready. Inspect characteristic properties and ESP32 firmware handling."
+            )
             emitLog("BLE write failed: \(error.localizedDescription)", level: .error)
             activeTransmission = nil
             processOutboundQueue()
@@ -554,6 +887,14 @@ extension BLEService: @preconcurrency CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error {
+            updateDiagnostic(
+                step: .ready,
+                detail: "Received a notify read error from \(characteristic.uuid.uuidString).",
+                analysis: "The BLE session is up, but one inbound notify read failed. Inspect the firmware payload path if this repeats.",
+                failureStep: .packetWrite,
+                failureReason: "Notify read failed: \(error.localizedDescription)",
+                isBlocking: false
+            )
             emitLog("Notify read failed: \(error.localizedDescription)", level: .error)
             return
         }

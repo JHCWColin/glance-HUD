@@ -7,6 +7,7 @@ enum HUDBLEConstants {
     static let notifyCharacteristicUUID = CBUUID(string: "B9FEC7E0-54B1-4E6C-8A0D-44A3D8B7C003")
 
     static let allowedDeviceNames: Set<String> = [
+        "GlanceHUD",
         "HUD Glasses",
         "XIAO-HUD"
     ]

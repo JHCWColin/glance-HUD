@@ -13,6 +13,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     headerCard
+                    diagnosticsCard
                     metricGrid
                     messageCard
                     logsCard
@@ -53,12 +54,20 @@ struct HomeView: View {
                     )
             }
 
-            Text("Allowed devices: HUD Glasses / XIAO-HUD")
+            Text("Allowed devices: GlanceHUD / HUD Glasses / XIAO-HUD")
                 .font(.system(size: 13, weight: .medium, design: .rounded))
                 .foregroundColor(.white.opacity(0.72))
 
+            Text("Current environment: \(viewModel.diagnosticSnapshot.environment.title)")
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundColor(environmentColor.opacity(0.92))
+
             HStack(spacing: 10) {
-                actionButton(title: "Scan", background: Color.white.opacity(0.16)) {
+                actionButton(
+                    title: "Scan",
+                    background: Color.white.opacity(0.16),
+                    disabled: !viewModel.diagnosticSnapshot.environment.supportsBLEHardware
+                ) {
                     viewModel.scanForDevices()
                 }
 
@@ -78,6 +87,65 @@ struct HomeView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
                         .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                )
+        )
+    }
+
+    private var diagnosticsCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("BLE Diagnostics")
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+
+                Spacer()
+
+                Text(viewModel.diagnosticSnapshot.isBlocking ? "BLOCKED" : "OK")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(viewModel.diagnosticSnapshot.isBlocking ? Color.red.opacity(0.72) : Color.green.opacity(0.72))
+                    )
+            }
+
+            diagnosticRow(
+                title: "Environment",
+                value: viewModel.diagnosticSnapshot.environment.title,
+                detail: viewModel.diagnosticSnapshot.environment.detail,
+                accent: environmentColor
+            )
+
+            diagnosticRow(
+                title: "Current Step",
+                value: viewModel.diagnosticSnapshot.currentStep.title,
+                detail: viewModel.diagnosticSnapshot.detail,
+                accent: .cyan
+            )
+
+            diagnosticRow(
+                title: "Failure Step",
+                value: viewModel.diagnosticSnapshot.failureStep?.title ?? "No blocking failure",
+                detail: viewModel.diagnosticSnapshot.failureReason ?? "No blocking failure is active. If the app remains in Scanning, the ESP32 is not advertising yet or its name/UUID does not match the app.",
+                accent: viewModel.diagnosticSnapshot.failureStep == nil ? .green : .orange
+            )
+
+            diagnosticRow(
+                title: "Analysis",
+                value: viewModel.diagnosticSnapshot.isBlocking ? "Action Required" : "Observation",
+                detail: viewModel.diagnosticSnapshot.analysis,
+                accent: .white
+            )
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.white.opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
         )
     }
@@ -176,7 +244,12 @@ struct HomeView: View {
         )
     }
 
-    private func actionButton(title: String, background: Color, action: @escaping () -> Void) -> some View {
+    private func actionButton(
+        title: String,
+        background: Color,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -189,6 +262,26 @@ struct HomeView: View {
                 )
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.45 : 1)
+    }
+
+    private func diagnosticRow(title: String, value: String, detail: String, accent: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundColor(.white.opacity(0.62))
+
+            Text(value)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundColor(accent)
+
+            Text(detail)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundColor(.white.opacity(0.82))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func logRow(entry: BLELogEntry) -> some View {
@@ -238,6 +331,10 @@ struct HomeView: View {
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
+    }
+
+    private var environmentColor: Color {
+        viewModel.diagnosticSnapshot.environment == .simulator ? .orange : .green
     }
 }
 
