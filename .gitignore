@@ -14,3 +14,6 @@ build/
 # CI outputs
 dist/
 release-assets/
+
+# Arduino CLI
+.arduino-build/

@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <string>
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -344,12 +343,12 @@ class GlanceHudWriteCallbacks final : public BLECharacteristicCallbacks {
       return;
     }
 
-    const std::string value = characteristic->getValue();
-    if (value.empty()) {
+    const String value = characteristic->getValue();
+    if (value.length() == 0) {
       return;
     }
 
-    consumeIncomingBytes(reinterpret_cast<const uint8_t*>(value.data()), value.length());
+    consumeIncomingBytes(reinterpret_cast<const uint8_t*>(value.c_str()), value.length());
   }
 };
 

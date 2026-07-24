@@ -38,8 +38,32 @@ ESP32 firmware should buffer incoming bytes until `\n`, then parse the full JSON
 1. Open [HUDApp.xcodeproj](/C:/Users/JHCWColin/Desktop/GlanceHUD/HUDApp.xcodeproj).
 2. Set your Apple Development Team in Signing.
 3. Build and run on a real iPhone.
-4. Ensure the ESP32 advertises as `HUD Glasses` or `XIAO-HUD`.
+4. Ensure the ESP32 advertises as `GlanceHUD`, `HUD Glasses`, or `XIAO-HUD`.
 5. Ensure the ESP32 exposes the service/characteristics above and advertises the custom service UUID if possible.
+
+## Firmware Build (Arduino CLI)
+
+Firmware sketch:
+
+- [固件/GlanceHUD_XIAO_ESP32S3/GlanceHUD_XIAO_ESP32S3.ino](/C:/Users/JHCWColin/Desktop/GlanceHUD/固件/GlanceHUD_XIAO_ESP32S3/GlanceHUD_XIAO_ESP32S3.ino)
+
+Verified local compile target:
+
+- FQBN: `esp32:esp32:XIAO_ESP32S3`
+
+Required Arduino libraries:
+
+- `Adafruit GFX Library`
+- `Adafruit SSD1306`
+- `ArduinoJson`
+
+Compile command:
+
+```powershell
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --build-path .arduino-build\GlanceHUD_XIAO_ESP32S3 "固件\GlanceHUD_XIAO_ESP32S3\GlanceHUD_XIAO_ESP32S3.ino"
+```
+
+If you are building from mainland China, use Espressif's China package index mirror and install a `-cn` ESP32 core release such as `esp32:esp32@3.3.10-cn`.
 
 ## Notes
 
