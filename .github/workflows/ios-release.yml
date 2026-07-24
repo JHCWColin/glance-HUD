@@ -1,0 +1,94 @@
+name: iOS Release Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to build, for example v1.0.0
+        required: true
+        type: string
+      release_name:
+        description: Optional release title
+        required: false
+        type: string
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    env:
+      PROJECT_PATH: HUDApp.xcodeproj
+      SCHEME: HUDApp
+      CONFIGURATION: Release
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.release_tag }}"
+            release_name="${{ github.event.inputs.release_name }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            release_name=""
+          fi
+
+          if [ -z "$tag" ]; then
+            echo "Release tag is required." >&2
+            exit 1
+          fi
+
+          if [ -z "$release_name" ]; then
+            release_name="$tag"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+
+      - name: Make packaging script executable
+        run: chmod +x scripts/package_ios_artifacts.sh
+
+      - name: Build simulator and unsigned device artifacts
+        run: scripts/package_ios_artifacts.sh
+
+      - name: Prepare release asset names
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp dist/HUDApp-simulator.zip "release-assets/HUDApp-${{ steps.meta.outputs.tag }}-simulator.zip"
+          cp dist/HUDApp-device-unsigned.ipa "release-assets/HUDApp-${{ steps.meta.outputs.tag }}-device-unsigned.ipa"
+          ls -lah release-assets
+
+      - name: Create or update GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.meta.outputs.tag }}"
+          release_name="${{ steps.meta.outputs.release_name }}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$release_name"
+          else
+            if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+              gh release create "$tag" --title "$release_name" --generate-notes
+            else
+              gh release create "$tag" --target "$GITHUB_SHA" --title "$release_name" --notes "Automated iOS build artifacts for $tag."
+            fi
+          fi
+
+          gh release upload "$tag" release-assets/* --clobber
