@@ -363,7 +363,8 @@ final class BLEService: NSObject {
     }
 }
 
-extension BLEService: CBCentralManagerDelegate {
+@MainActor
+extension BLEService: @preconcurrency CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         let description = stateDescription(for: central.state)
 
@@ -470,7 +471,8 @@ extension BLEService: CBCentralManagerDelegate {
 
 }
 
-extension BLEService: CBPeripheralDelegate {
+@MainActor
+extension BLEService: @preconcurrency CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error {
             emitLog("Service discovery failed: \(error.localizedDescription)", level: .error)

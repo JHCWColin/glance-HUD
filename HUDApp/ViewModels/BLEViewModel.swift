@@ -24,15 +24,27 @@ final class BLEViewModel: ObservableObject {
     private var lastMinuteToken: String?
     private var latestWeather: WeatherSnapshot?
 
+    override init() {
+        self.bleService = BLEService()
+        self.weatherService = WeatherService()
+        self.locationService = LocationService()
+        super.init()
+        configureServices()
+    }
+
     init(
-        bleService: BLEService = BLEService(),
-        weatherService: WeatherService = WeatherService(),
-        locationService: LocationService = LocationService()
+        bleService: BLEService,
+        weatherService: WeatherService,
+        locationService: LocationService
     ) {
         self.bleService = bleService
         self.weatherService = weatherService
         self.locationService = locationService
+        super.init()
+        configureServices()
+    }
 
+    private func configureServices() {
         UIDevice.current.isBatteryMonitoringEnabled = true
         bleService.delegate = self
     }
